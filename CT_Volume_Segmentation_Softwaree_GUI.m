@@ -27,7 +27,7 @@ function varargout = CT_Volume_Segmentation_Softwaree_GUI(varargin)
 
 % Edit the above text to modify the response to help CT_Volume_Segmentation_Softwaree_GUI
 
-% Last Modified by GUIDE v2.5 17-Mar-2021 14:10:00
+% Last Modified by GUIDE v2.5 23-Apr-2021 10:44:52
 
 % Begin initialization code - DO NOT EDIT
 gui_Singleton = 1;
@@ -66,8 +66,11 @@ handles.previous_iter_num = 40;
 handles.total_no_of_slides = 0;
 handles.time_interval = 100;
 handles.phi = [];
+handles.region_based_phi = [];
 handles.segmented_flag = false;
+handles.contour_based_flag = false;
 set(handles.PlayToggleBtn, 'String', 'Play');
+% set(handles.InhomogeneousInputCheckBox, 'Enable', 'off');
 % Choose default command line output for CT_Volume_Segmentation_Softwaree_GUI
 handles.output = hObject;
 % Update handles structure
@@ -135,6 +138,10 @@ else
     handles.total_no_of_slides = total_no_of_slides;
     handles.segmented_flag = false;
     handles.phi = [];
+    handles.region_based_phi = [];
+    handles.contour_based_flag = false;
+%     set(handles.InhomogeneousInputCheckBox, 'Value', 0);
+%     set(handles.InhomogeneousInputCheckBox, 'Enable', 'off');
     % display the middle slide 
     imshow(squeeze(selected_input(:,:,middle_slide_no,:)), [double(min(handles.selected_input(:))), double(max(handles.selected_input(:)))], 'Parent', handles.DisplayPanel);
 end
@@ -150,6 +157,15 @@ function SegmentBtn_Callback(hObject, eventdata, handles)
 % do nothing if the input is empty
 if isequal(handles.selected_input_path, '')
 else
+    terminal_output = get(handles.TerminalEditTextBox, 'String');
+    if isempty(terminal_output)
+        terminal_output = {};
+    end
+    str = 'Starting the segmentation process...';
+    terminal_output = [str; terminal_output];
+    set(handles.TerminalEditTextBox, 'String', terminal_output);
+    drawnow
+    
     totaltime = 0;
     t0 = cputime;
 
@@ -158,8 +174,13 @@ else
     IMG = double(IMG);
 
     % pre-processing
-    % IMG = 255*mat2gray(IMG);  % Image normalization
-    IMG = medfilt3(IMG);  % ok
+    mean_filter = fspecial('average',3);
+    IMG = imfilter(IMG,mean_filter);
+%     se = strel('disk',40);
+%     IMG = imclose(IMG,se);
+%     IMG = 255*mat2gray(IMG);  % Image normalization
+%     IMG = wiener2(IMG, [2,2]);
+%     IMG = medfilt3(IMG);  % ok
     % IMG = histeq(IMG);    % histogram equalization, blank, not work
 
     % delete black slices
@@ -221,65 +242,15 @@ else
     IMG(:,:,boolZ) = [];
         
     handles.segmented_input = IMG;
-    
-    % constant initialize
-    ITR_INNER = 10;
-    ITR_OUTER = str2double(get(handles.IterNumEditTextBox, 'String'));
-    EPSILON = 1;
-    SIGMA = 4;
-    ONE_K = imgaussfilt3(IMG,SIGMA);
-    K = fspecial('gaussian',2*ceil(2*SIGMA)+1,SIGMA);
-    LAMBDA = 1;
-    COEF_AL = 0.001*255^2;
-    COEF_DRLSE = 1;
-    TIMESTEP = 0.1;
-    
-    % initialize level set function phi and bias field b
-    [x,y,z] = size(IMG);
-    phi = ones(size(IMG));
-    b = phi;
-    phi(ceil(x/2-25):ceil(x/2+25),ceil(y/2-25):ceil(y/2+25),ceil(z/2-25):ceil(z/2+25)) = -1;
-    m = UpdateM(phi,EPSILON);    
-
-    terminal_output = get(handles.TerminalEditTextBox, 'String');
-    if isempty(terminal_output)
-        terminal_output = {};
+    if (get(handles.InhomogeneousInputCheckBox, 'Value'))
+        se = strel('disk',40);
+        IMG = imclose(IMG,se);
     end
-    str = 'Starting the segmentation process...';
-    terminal_output = [str; terminal_output];
-    set(handles.TerminalEditTextBox, 'String', terminal_output);
-    drawnow
-    
-    for i = 1:ITR_OUTER
-        terminal_output = get(handles.TerminalEditTextBox, 'String');
-        if isempty(terminal_output)
-            terminal_output = {};
-        end
-        % reflect segmentation progress in the terminal
-        str = sprintf('Current iteration number = %d/%d', i, ITR_OUTER);
-        terminal_output = [str; terminal_output];
-        set(handles.TerminalEditTextBox, 'String', terminal_output);
-        % allow the user interface to update 
-        drawnow
-        % update (b*K) and (b^2*K)
-        bk = convn(b,K,'same');
-        b2k = convn(b.^2,K,'same');
-        % energy minimization with respect to c
-        c = UpdateC(bk,b2k,IMG,m);
-        % energy minimization with respect to phi
-        phi = UpdatePHI(bk,b2k,IMG,m,c,phi,ONE_K,ITR_INNER,EPSILON,LAMBDA,COEF_AL,COEF_DRLSE,TIMESTEP);
-        % update m
-        m = UpdateM(phi,EPSILON);
-        % energy minimization with respect to b
-        b = UpdateB(IMG,m,c,K);
-    end
-
-    % visualize the result in UI
-    % figure;
-    % imshow3D(IMG,phi); 
+    phi = RegionBasedSegementation(IMG, hObject, eventdata, handles);
     % update the parameters in the handles structure
     handles.segmented_flag = true;
     handles.phi = phi;
+    handles.region_based_phi = phi;
     total_no_of_slides = size(IMG,3);
     handles.total_no_of_slides = total_no_of_slides;
     total_no_of_slides_str = sprintf('/%d', total_no_of_slides);
@@ -289,14 +260,14 @@ else
     set(handles.SlideNumberSlider, 'Max', total_no_of_slides);
     set(handles.SlideNumberSlider, 'Value', middle_slide_no);
     guidata(hObject,handles);
-    
+
     val = round(str2double(get(handles.CurrentSlideNumberEditTextBox, 'String')));
     imshow(squeeze(handles.segmented_input(:,:,val,:)), [double(min(handles.segmented_input(:))), double(max(handles.segmented_input(:)))], 'Parent', handles.DisplayPanel);
     % display the level set function on top of the input
     hold on;
     contour(squeeze(phi(:,:,val)),[0 0],'r')
     hold off;
-    
+
     % record the time used for the segmentation and show it in the terminal
     t1 = cputime;
     totaltime = totaltime + t1 - t0;
@@ -317,6 +288,58 @@ for i = 1:2
     term2 = b2k.*m(:,:,:,i);
     c(i) = sum(term1,'all')/sum(term2,'all');
 end
+
+function phi_output = RegionBasedSegementation(IMG, hObject, eventdata, handles)
+% constant initialize
+ITR_INNER = 10;
+ITR_OUTER = str2double(get(handles.IterNumEditTextBox, 'String'));
+EPSILON = 1;
+SIGMA = 4;
+ONE_K = imgaussfilt3(IMG,SIGMA);
+K = fspecial('gaussian',2*ceil(2*SIGMA)+1,SIGMA);
+LAMBDA = 1;
+COEF_AL = 0.001*255^2;
+COEF_DRLSE = 1;
+TIMESTEP = 0.1;
+
+% initialize level set function phi and bias field b
+[x,y,z] = size(IMG);
+phi = ones(size(IMG));
+b = phi;
+phi(ceil(x/2-25):ceil(x/2+25),ceil(y/2-25):ceil(y/2+25),ceil(z/2-25):ceil(z/2+25)) = -1;
+m = UpdateM(phi,EPSILON);    
+
+for i = 1:ITR_OUTER
+%     if (~get(handles.InhomogeneousInputCheckBox, 'Value'))
+        terminal_output = get(handles.TerminalEditTextBox, 'String');
+        if isempty(terminal_output)
+            terminal_output = {};
+        end
+        % reflect segmentation progress in the terminal
+        str = sprintf('Current iteration number = %d/%d', i, ITR_OUTER);
+        terminal_output = [str; terminal_output];
+        set(handles.TerminalEditTextBox, 'String', terminal_output);
+        % allow the user interface to update 
+        drawnow
+%     end
+    % update (b*K) and (b^2*K)
+    bk = convn(b,K,'same');
+    b2k = convn(b.^2,K,'same');
+    % energy minimization with respect to c
+    c = UpdateC(bk,b2k,IMG,m);
+    % energy minimization with respect to phi
+    phi = UpdatePHI(bk,b2k,IMG,m,c,phi,ONE_K,ITR_INNER,EPSILON,LAMBDA,COEF_AL,COEF_DRLSE,TIMESTEP);
+    % update m
+    m = UpdateM(phi,EPSILON);
+    % energy minimization with respect to b
+    b = UpdateB(IMG,m,c,K);
+end
+phi_output = phi;
+handles.phi = phi;
+handles.region_based_phi = phi;
+% set(handles.InhomogeneousInputCheckBox, 'Enable', 'on');
+drawnow
+guidata(hObject,handles);
 
 % energy minimization with respect to phi
 function phi = UpdatePHI(bk,b2k,IMG,m,c,phi,ONE_K,ITR_INNER,EPSILON,LAMBDA,COEF_AL,COEF_DRLSE,TIMESTEP)
@@ -354,7 +377,7 @@ m(:,:,:,1) = Heaviside(phi,EPSILON);
 m(:,:,:,2) = 1-Heaviside(phi,EPSILON);
 
 function phi = NeumannBoundCond(phi)
-PADSIZE = 5;
+PADSIZE = 3;
 [x,y,z] = size(phi);
 phi = padarray(phi,[PADSIZE,PADSIZE,PADSIZE]);
 phi([1 x],[1 y],[1 z]) = phi([3 x-2],[3 y-2],[3 z-2]);  
@@ -624,8 +647,12 @@ function TimeIntervalEditTextBox_Callback(hObject, eventdata, handles)
 val = str2double(get(handles.TimeIntervalEditTextBox, 'String'));
 % validate user input, must be a number
 if ~isnan(val)
-    handles.time_interval = val;
-    guidata(hObject, handles);
+    if val <= 0
+        set(handles.TimeIntervalEditTextBox, 'String', handles.time_interval);
+    else
+        handles.time_interval = val;
+        guidata(hObject, handles);
+    end
 else
     set(handles.TimeIntervalEditTextBox, 'String', handles.time_interval);
 end
@@ -667,8 +694,12 @@ val = round(str2double(get(handles.IterNumEditTextBox, 'String')));
 set(handles.IterNumEditTextBox, 'String', num2str(val));
 % validate user input, must be a number
 if ~isnan(val)
-    handles.previous_iter_num = val;
-    guidata(hObject, handles);
+    if val <= 0
+        set(handles.IterNumEditTextBox, 'String', num2str(handles.previous_iter_num)); 
+    else
+        handles.previous_iter_num = val;
+        guidata(hObject, handles);
+    end
 else
     set(handles.IterNumEditTextBox, 'String', num2str(handles.previous_iter_num)); 
 end
@@ -685,3 +716,11 @@ function IterNumEditTextBox_CreateFcn(hObject, eventdata, handles)
 if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
     set(hObject,'BackgroundColor','white');
 end
+
+% --- Executes on button press in InhomogeneousInputCheckBox.
+function InhomogeneousInputCheckBox_Callback(hObject, eventdata, handles)
+% hObject    handle to InhomogeneousInputCheckBox (see GCBO)
+% eventdata  reserved - to be defined in a future version of MATLAB
+% handles    structure with handles and user data (see GUIDATA)
+
+% Hint: get(hObject,'Value') returns toggle state of InhomogeneousInputCheckBox   
